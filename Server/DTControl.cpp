@@ -2,17 +2,15 @@
 #include "DTControl.h"
 
 HDEV DTControl::hDriver = NULL;
-bool DTControl::boardInitialized = false;
-DTControl::Parameters DTControl::params = { 0, "NULL", "NULL" };
+ECODE DTControl::status = 0;
+char DTControl::name[MAX_BOARD_NAME_LENGTH] = "NULL";
+char DTControl::driver[MAX_BOARD_NAME_LENGTH] = "NULL";
 
-HDASS AnalogSubsystem::hdassAnalog = NULL;
-HBUF AnalogSubsystem::hBuffer = NULL;
-bool AnalogSubsystem::initialized = false;
-bool AnalogSubsystem::isContinuous = false;
+HDASS AnalogIn::hdassAnalog = NULL;
+HBUF AnalogInContinuous::hBuffer = NULL;
 
-HDASS DigitalSubsystem::hdassDigitalIn = NULL;
-HDASS DigitalSubsystem::hdassDigitalOut = NULL;
-bool DigitalSubsystem::initialized = false;
+HDASS DigitalIn::hdassDigitalIn = NULL;
+HDASS DigitalOut::hdassDigitalOut = NULL;
 
 #pragma region DTControl Implementation
 /*
@@ -23,11 +21,11 @@ the board.  If successful, enumeration is halted.
 BOOL CALLBACK DTControl::GetDriver( LPSTR lpszBoardName, LPSTR lpszDriverName, LPARAM lParam )   
 {
    /* fill in board strings */
-   lstrcpynA(params.name,lpszBoardName,MAX_BOARD_NAME_LENGTH-1);
-   lstrcpynA(params.driver,lpszDriverName,MAX_BOARD_NAME_LENGTH-1);
+   lstrcpynA(name,lpszBoardName,MAX_BOARD_NAME_LENGTH-1);
+   lstrcpynA(driver,lpszDriverName,MAX_BOARD_NAME_LENGTH-1);
 
    /* try to open board */
-   params.status = olDaInitialize((LPTSTR)lpszBoardName, &hDriver);
+   status = olDaInitialize((LPTSTR)lpszBoardName, &hDriver);
    if (hDriver != NULL)
       return FALSE;          /* false to stop enumerating */
    else                      
@@ -36,14 +34,14 @@ BOOL CALLBACK DTControl::GetDriver( LPSTR lpszBoardName, LPSTR lpszDriverName, L
 
 void DTControl::ErrorCheck(ECODE ecode)
 {
-    if ((params.status = ecode) != OLNOERROR)
+    if ((status = ecode) != OLNOERROR)
         throw ecode;
 }
 
 void DTControl::InitializeBoard()
 {
     ECODE ecode;
-    if (boardInitialized)
+    if (hDriver != NULL)
         return;
 
     /* Get first available Open Layers board */
@@ -52,14 +50,12 @@ void DTControl::InitializeBoard()
         throw ecode;
 
     /* check for error within callback function */
-    if (params.status != OLNOERROR)
+    if (status != OLNOERROR)
         throw ecode;
 
     /* check for NULL driver handle - Means no boards */
     if (hDriver == NULL)
         throw "No Open Layer Boards Detected.";
-
-    boardInitialized = true;
 }
 
 void DTControl::ReleaseBoard()
@@ -70,9 +66,37 @@ void DTControl::ReleaseBoard()
 #pragma endregion
 
 #pragma region AnalogSubsystem Implementation
-AnalogSubsystem::AnalogSubsystem()
+void AnalogInSingleValue::Initialize()
 {
-    params.freq = 1000.0;
+    try {
+        InitializeBoard();
+
+        if (hdassAnalog != NULL)
+            return;
+
+        if (channelList.size() == 0)
+            throw "No Analog channels present.";
+
+        ErrorCheck(olDaGetDASS(hDriver, OLSS_AD, 0, &hdassAnalog));
+        ErrorCheck(olDaSetDataFlow(hdassAnalog, OL_DF_SINGLEVALUE));
+        ErrorCheck(olDaConfig(hdassAnalog));
+    }
+    catch (ECODE e) { throw e; }
+}
+
+long AnalogInSingleValue::GetValue()
+{
+    long result;
+    ErrorCheck(olDaGetSingleValue(hdassAnalog, &result, channelList.front(), gain));
+
+    return result;
+}
+
+void AnalogInSingleValue::GetValues(long *values)
+{
+    int i = 0;
+    for (auto channel = channelList.begin(); channel != channelList.end(); ++channel)
+        ErrorCheck(olDaGetSingleValue(hdassAnalog, &values[i++], *channel, gain));
 }
 
 void AnalogSubsystem::Initialize(bool continuous)
@@ -82,38 +106,11 @@ void AnalogSubsystem::Initialize(bool continuous)
 
         if (initialized)
             return;
+ 
+        ErrorCheck(olDaGetDASS(hDriver, OLSS_AD, 0, &hdassAnalog);
 
-#pragma region Get Handle to ADC subsystem 
-        /* get handle to first available ADC sub system */
-        ErrorCheck(olDaGetDevCaps(hDriver, OLDC_ADELEMENTS, &params.numberADs));
 
-        UINT currentAD = 0;
-        UINT ec;
-        // Enumerate through all the A/D subsystems and try and select the first available one...
-        while (1)
-        {
-            ec = olDaGetDASS(hDriver, OLSS_AD, currentAD, &hdassAnalog);
-            if (ec != OLNOERROR)
-            {
-                // busy subsys etc...
-                currentAD++;
-                if (currentAD > params.numberADs)
-                {
-                    throw "No Available A/D subsystems.";
-                }
 
-            }
-            else
-                break;
-        }
-#pragma endregion
-
-        isContinuous = continuous;
-        /* Configure for acquisition type */
-        if (isContinuous)
-            InitializeContinuous();
-        else
-            InitializeSingle();
 
         ErrorCheck(olDaConfig(hdassAnalog));    //configure subsystem
 
@@ -148,13 +145,7 @@ void AnalogSubsystem::Initialize(bool continuous)
 
 void AnalogSubsystem::InitializeSingle()
 {
-    try {
-        if (params.numChannels == 0)
-            throw "No Analog channels present.";
 
-        ErrorCheck (olDaSetDataFlow(hdassAnalog,OL_DF_SINGLEVALUE));
-    }
-    catch (...) { throw; }
 }
 
 void AnalogSubsystem::InitializeContinuous()
@@ -189,9 +180,10 @@ void AnalogSubsystem::InitializeContinuous()
 #pragma region Set and configure channels
         ErrorCheck(olDaSetChannelListSize(hdassAnalog, params.numChannels));
         UINT i = 0;
-        for (i = 0; i < params.numChannels; i++)
+        for (i = 0; i < params.numChannels; i++) {
             ErrorCheck(olDaSetChannelListEntry(hdassAnalog, i, params.channelList[i]));
             ErrorCheck(olDaSetGainListEntry(hdassAnalog, i, params.gainList[i]));
+        }
 #pragma endregion
     }
     catch (ECODE e) { throw e; }
